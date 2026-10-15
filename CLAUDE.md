@@ -25,6 +25,8 @@
 
 已批准依赖:`argon2`、`@nestjs/throttler`、`next-intl`、`@vimeo/player`、`exceljs`、`libphonenumber-js`、`react-hook-form`、NestJS 的 JWT 与 cookie 相关包。
 测试:`apps/api` 用 Jest,`packages/shared` 和 `apps/web` 用 Vitest。
+基础工具链已批准:`typescript`(锁 6.0.x)、`eslint`、`typescript-eslint`、`eslint-config-next`、`zod`,Next/React/Tailwind v4/PostCSS,NestJS 核心包与 CLI,Jest/ts-jest/supertest/Vitest 及对应 `@types`。具体版本由各里程碑计划确定。
+apps/api 若 Jest 跑不通 ESM,先停下来问,不要自行改用 Vitest。
 
 ## 目录结构
 
@@ -234,6 +236,13 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - M4、M5 的评论与踢出先用轮询(踢出:每次请求校验 + 10 秒轮询),M6 再换成 SSE
 
 完成一个里程碑才进下一个。每个里程碑开始前,先出计划,等我确认再改代码。
+
+## 安装与依赖
+
+- pnpm 若因发布冷却期拒装,退到上一个兼容版本,不要关闭该设置
+- 依赖构建脚本只逐个批准必要的包,不用 --all
+- 不用 nest new、create-next-app 等生成器,手写文件
+- M0 不装 shadcn/ui 和 next-intl,M3 起再接
 
 ## 待定(到对应里程碑再问,问之前不要自行决定)
 
