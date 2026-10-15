@@ -54,7 +54,7 @@ apps/api 若 Jest 跑不通 ESM,先停下来问,不要自行改用 Vitest。
 - `apps/web/scripts/run-next.mjs`:读 `WEB_PORT`,映射成 Next 读的 `PORT`,再启动 Next
 - 每个包用两个 tsconfig:`tsconfig.json` 含测试,用于 typecheck;`tsconfig.build.json` 排除测试,用于 build
 
-## 常用命令(M0 完成后可用)
+## 常用命令(其中两条 prisma 命令要到 M1 完成后才可用,其余已可用)
 
 ```powershell
 pnpm install
@@ -74,6 +74,7 @@ pnpm typecheck
 - `dev` 只在启动时构建一次 shared,之后改 shared 源码要重启
 - 默认端口:api 4000(`API_PORT`),web 3000(`WEB_PORT`);`API_URL` 默认 `http://localhost:4000`
 - web 的 `dev`/`start` 走 `scripts/run-next.mjs`。Windows 上它的信号转发不可靠,部署到 Linux 时(M8)再确认
+- 已知问题:根目录 `pnpm dev` 会让 api 与 web 的 `predev` 同时构建 shared,两个 `tsc` 同时写入 `shared/dist`。连续 5 次实测没有出问题。若启动 `dev` 时偶发"找不到 shared"或文件被占用,重启即可;只有反复出现才处理,不要提前改脚本约定
 
 ---
 
@@ -246,7 +247,7 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 
 | 里程碑 | 内容 |
 |---|---|
-| M0 | 项目骨架:workspace、Next.js、NestJS、shared、`/health`、`/time`(已完成 shared、api、web 三段,待整体验收) |
+| M0 | 项目骨架:workspace、Next.js、NestJS、shared、`/health`、`/time`(已完成并验收) |
 | M1 | 数据库:Prisma schema、迁移、种子数据;核心纯函数 + 测试 |
 | M2 | API 核心:管理员登录与权限、研讨会/天/期/场次 CRUD、Vimeo 服务 |
 | M3 | 管理后台界面 |
