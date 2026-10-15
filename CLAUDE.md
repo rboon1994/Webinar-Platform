@@ -32,11 +32,27 @@ apps/api 若 Jest 跑不通 ESM,先停下来问,不要自行改用 Vitest。
 
 ```
 .
-├─ apps/web
-├─ apps/api
-├─ packages/shared
-└─ .env.example
+├─ apps
+│  ├─ web
+│  │  ├─ app
+│  │  │  └─ lib
+│  │  └─ scripts
+│  └─ api
+│     ├─ src
+│     └─ test
+├─ packages
+│  └─ shared
+│     └─ src
+├─ .env.example
+├─ package.json
+├─ pnpm-workspace.yaml
+├─ tsconfig.base.json
+└─ eslint.config.mjs
 ```
+
+约定:
+- `apps/web/scripts/run-next.mjs`:读 `WEB_PORT`,映射成 Next 读的 `PORT`,再启动 Next
+- 每个包用两个 tsconfig:`tsconfig.json` 含测试,用于 typecheck;`tsconfig.build.json` 排除测试,用于 build
 
 ## 常用命令(M0 完成后可用)
 
@@ -45,10 +61,19 @@ pnpm install
 pnpm --filter api prisma migrate dev
 pnpm --filter api prisma db seed
 pnpm dev
+pnpm build
 pnpm test
 pnpm lint
 pnpm typecheck
 ```
+
+## 运行与构建
+
+- 根目录 `test`、`typecheck`、`build` 串行执行(`--workspace-concurrency=1`);`dev` 并行
+- api 与 web 的 `test`、`typecheck`、`build`、`dev` 运行前,会先构建 shared(pre 脚本)
+- `dev` 只在启动时构建一次 shared,之后改 shared 源码要重启
+- 默认端口:api 4000(`API_PORT`),web 3000(`WEB_PORT`);`API_URL` 默认 `http://localhost:4000`
+- web 的 `dev`/`start` 走 `scripts/run-next.mjs`。Windows 上它的信号转发不可靠,部署到 Linux 时(M8)再确认
 
 ---
 
@@ -221,7 +246,7 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 
 | 里程碑 | 内容 |
 |---|---|
-| M0 | 项目骨架:workspace、Next.js、NestJS、shared、`/health`、`/time` |
+| M0 | 项目骨架:workspace、Next.js、NestJS、shared、`/health`、`/time`(已完成 shared、api、web 三段,待整体验收) |
 | M1 | 数据库:Prisma schema、迁移、种子数据;核心纯函数 + 测试 |
 | M2 | API 核心:管理员登录与权限、研讨会/天/期/场次 CRUD、Vimeo 服务 |
 | M3 | 管理后台界面 |
@@ -243,6 +268,9 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - 依赖构建脚本只逐个批准必要的包,不用 --all
 - 不用 nest new、create-next-app 等生成器,手写文件
 - M0 不装 shadcn/ui 和 next-intl,M3 起再接
+- ESLint 10 与 eslint-config-next 16 有 peer 警告,已知且接受。不降级 ESLint,不加 `peerDependencyRules`,让警告保持可见。升级相关包时重新检查,M3 之前复核一次
+- `next.config.ts` 里 `agentRules: false`,不要创建 `AGENTS.md`;`next-env.d.ts` 不进 Git
+- 版本写法统一用 `^`(typescript 用 `~6.0.x`),锁文件版本不能被改动
 
 ## 待定(到对应里程碑再问,问之前不要自行决定)
 
@@ -260,6 +288,9 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - 品牌配色、默认界面语言
 - 管理员是否需要两步验证
 - 是否保留虚拟人数与预设评论的总开关
+- 两个 app 目前不读根目录 `.env`,只读系统环境变量。M1 连数据库之前必须定怎么读 `.env`,不要自行决定
+- web 取数没有超时设置,M3 之前处理
+- `layout.tsx` 缺 `<html lang>`,等默认界面语言定了再补
 - 新功能想法
 
 ---

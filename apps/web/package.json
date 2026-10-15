@@ -1,0 +1,33 @@
+{
+  "name": "web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "pnpm --filter @webinar/shared build",
+    "dev": "node scripts/run-next.mjs dev",
+    "prebuild": "pnpm --filter @webinar/shared build",
+    "build": "next build",
+    "start": "node scripts/run-next.mjs start",
+    "pretest": "pnpm --filter @webinar/shared build",
+    "test": "vitest run",
+    "pretypecheck": "pnpm --filter @webinar/shared build",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@webinar/shared": "workspace:*",
+    "next": "^16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "eslint-config-next": "^16.4.0",
+    "postcss": "^8.5.30",
+    "tailwindcss": "^4.3.3",
+    "vitest": "^5.0.4"
+  }
+}
