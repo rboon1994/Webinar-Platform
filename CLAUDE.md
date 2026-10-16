@@ -210,6 +210,7 @@ pnpm typecheck
 种子数据:
 - 参考数据(CountryCode 三行)总是执行
 - 演示数据只在带 `--demo` 时执行,`NODE_ENV=production` 时拒绝运行;用写死的固定 UUID 按 id upsert,可重复运行
+- 演示场次的 `startsAt`、`endsAt` 每次运行带 `--demo` 的种子时,都按"现在"重新定位(例如第一天已开始 5 分钟、仍在直播,第二天在明天同一时刻),并更新已有的行,不新增行。这样隔天重新运行种子,演示数据仍然是"直播中"。这个行为在 M1.5 验收时依赖,S8 必须实现并有测试
 - 管理员账号不在 M1 种子里,留到 M2
 
 ## 功能清单
@@ -285,7 +286,12 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
     - 只报名了别的期,而可报名的期是另一个,则 `writes` 带 `enroll`(原有报名不动)
     - 同时被踢出且没有可报名的期时,返回 `KICKED` 而不是 `NO_RUN`
 - `resolveWhitelistAccess`:返回 `allowed` 或 `denied`(`NOT_FOUND`、`KICKED`、`NOT_ENROLLED`,其中 `NOT_FOUND` 与 `NOT_ENROLLED` 对外同一句话)。输入含 `@` 视为邮箱,否则视为手机号
-- `getWebinarState`:同一时刻有两场都在直播时,取 `startsAt` 早的,再取 id 小的
+- `getWebinarState(sessions, now)`:输入是场次数组(`{id, startsAt, endsAt}`)和 `now`,顺序任意;返回判别联合 `live`(`session`)/ `upcoming`(`phase`: `before_first` | `between_days`,`next`)/ `ended`(`lastEnded`)/ `no_schedule`。规则不变:`live` 同时有多场时取 `startsAt` 最早,再取 id 小的;`upcoming` 取 `startsAt` 最早,再取 id 小的;`before_first` 指没有任何已结束场次;`ended` 的 `lastEnded` 取 `endsAt` 最晚,再取 id 小的。返回的 `session` 是传入的对象本身,不是副本
+- `selectCurrentRun(runs, now)`:输入的 run 是 `{id, createdAt, sessions[]}`,调用方已过滤停用的期和(登录观众)未报名的期;返回 `{ runId, phase: live | upcoming | ended }` 或 `null`。按「当前期的定义」①②③:② 里每个期用自己"最早的未来场次"的开始时间比较;③ 里用每个期"最大的 `endsAt`"比较,最晚的优先;同一阶段内并列取 `createdAt` 最早,再取 id 小的。有已结束又有未开始场次的期算 `upcoming`。没有场次的期被忽略(但仍校验它的 `createdAt`)
+- `selectEnrollableRun(runs, now)`:返回 `string | null`;当前期的阶段是 `live` 或 `upcoming` 时返回 `runId`,`ended` 或没有当前期返回 `null`(即「可报名的期」)
+- `computeTargetSeconds(serverNowMs, startsAtMs, durationSeconds)`:返回 `clamp((serverNowMs - startsAtMs) / 1000, 0, durationSeconds)`,不取整
+- 以上函数(`getWebinarState`、`selectCurrentRun`、`selectEnrollableRun`、`computeTargetSeconds`)共同的规则:都是纯函数,时间一律从参数传入,不得调用 `Date.now()`、无参 `new Date()`、读环境变量或访问数据库,也不得修改传入的参数;无效输入(无效或不是 `Date` 的值、`endsAt` 不晚于 `startsAt`、非有限数、负的时长)一律抛 `RangeError`,并且检查所有输入,包括不影响本次结果的坏数据;id 的比较用 UTF-16 代码单元顺序(`a < b`),不得用 `localeCompare`(它随语言环境变化,浏览器和服务器可能得出不同结果)
+- 导出的类型:`SessionWindow`、`WebinarState`、`RunWindow`、`RunPhase`。内部辅助函数 `instant` 和 `range` 不对外导出
 - `parsePhone(raw, defaultCountry)` 返回 `{ status: ready | review | invalid, e164, country, reasons }`。`normalizePhone(raw, defaultCountry, allowedCountries?)` 基于它:`ready` 和 `review` 返回 `e164`,`invalid` 返回 `null`;`allowedCountries` 不传则不限制国家
   - 默认国家作为参数传入(ISO 国家码,默认取 CountryCode 表里 `isDefault` 的那一行;导入和观众端可另选国家,见「名单导入规则」)。使用 `libphonenumber-js` 的 `max` 元数据。测试用例的期望值必须先用真实库跑出来再固定,不要凭记忆写
   - 手机号在数据库里只存一列 E.164(`Attendee.phone`)。界面上分开显示区号和号码,用库从 E.164 拆出,不存两份
@@ -307,6 +313,9 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - 同一个马来西亚号码的五种写法(`0160809580`、`160809580`、`016-080 9580`、`+60160809580`、`60160809580`)得到同一个 E.164
 - 选错默认国家时(例如把马来西亚号码按新加坡解析),得到的是"长度合理但无效"的另一个号码,状态是 `review`(`NOT_VALID_RANGE`),S2 不猜测,M3 的导入预览要给出建议
 - 已知误判:美国国内写法 `1-202-555-0123` 会被判为 `review`(`LOOKS_LIKE_INCLUDES_COUNTRY_CODE`),可以接受
+
+### 已知风险
+- `instant()` 用 `instanceof Date` 判断,在 Jest 沙箱里,来自另一个运行环境的 `Date` 可能被误判为无效。如果 S7 的数据库测试里出现"not a valid date",改成跨环境的判断(例如 `Object.prototype.toString.call(x) === "[object Date]"`),并用 `vm.runInNewContext` 造一个跨环境的 `Date` 写回归测试。在出现之前不要改
 
 ## 直播同步规则
 
@@ -384,9 +393,10 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 |---|---|
 | M0 | 项目骨架:workspace、Next.js、NestJS、shared、`/health`、`/time`(已完成并验收) |
 | M1 | 数据库:Prisma schema、迁移、种子数据;核心纯函数 + 测试 |
+| M1.5 | 可见切片:用演示数据端到端看到"数据库 → API → 网页"(M1 验收之后做) |
 | M2 | API 核心:管理员登录与权限、研讨会/天/期/场次 CRUD、Vimeo 服务 |
 | M3 | 管理后台界面 |
-| M4 | 观众接入与场次状态、落地页 |
+| M4 | 观众接入(WHITELIST / OPEN)、会话令牌、接入后的入口与提示;落地页的状态徽章和倒计时在 M1.5 已做 |
 | M5 | 观看页:5a 播放器与同步、5b 评论、5c 人气引擎 |
 | M6 | SSE 实时与控制室 |
 | M7 | 数据分析与导出 |
@@ -397,10 +407,23 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - M4、M5 的评论与踢出先用轮询(踢出:每次请求校验 + 10 秒轮询),M6 再换成 SSE
 
 M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全绿):
-- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期 → S4 人气 → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
+- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期(已完成) → S4 人气 → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
 - M1 完成后的整体验收,必须从全新克隆再跑一遍
 
 完成一个里程碑才进下一个。每个里程碑开始前,先出计划,等我确认再改代码。
+
+### M1.5 可见切片
+- 目的:尽早让产品负责人在浏览器里看到真实运行的效果,并端到端验证地基(数据库、API、纯函数、网页)。它是 M4 的一小部分提前做,不取代 M4,M4 时在它的基础上扩展,不推倒重来
+- API:一个公开的只读接口,按研讨会别名返回:标题、简介、接入模式、状态(用 `getWebinarState`,当前期用 `selectCurrentRun`)、相关场次的开始和结束时间、`serverTime`。不返回任何观众数据,不返回内部编号。加基础限流(`@nestjs/throttler`,已批准)。别名不存在返回 404
+- 网页:落地页 `/w/[alias]`,显示标题、简介、状态徽章(未开始 / 直播中 / 两天之间 / 已结束)和倒计时。倒计时以接口返回的 `serverTime` 校准,不用浏览器本地时钟判断状态。数据来自种子的演示数据(`demo-whitelist`、`demo-open`)
+- 状态:除了四种,还要处理"暂无排期"(没有可用的期或场次时显示,不崩溃)
+- 取期:匿名落地页在该研讨会所有启用的期里用 `selectCurrentRun` 选出一个,再用该期的场次调用 `getWebinarState`
+- 文案:界面文字走一个最简单的字典文件(zh、en 两份,不装 next-intl),组件里不写死文字,通过查词函数取字;键名分层命名,值是纯文本,方便 M3 原样搬进 next-intl。zh 与 en 的键必须一致,用一个测试保证。临时默认语言 zh,"默认界面语言"仍在「待定」里,M3 前定;`layout.tsx` 的 `<html lang>` 在 M1.5 随这个临时默认设置
+- 不做:登录或接入表单、观看页、管理后台
+- 视觉:M1.5 用 `frontend-design` 做轻量、可替换的样式:颜色和字体集中在 `globals.css` 的一处主题变量里,M3 用 `ui-ux-pro-max` 定正式配色字体时只改这一处;M1.5 不运行 `ui-ux-pro-max`;不做动效和复杂布局;完成后用 `web-design-guidelines` 检查无障碍(状态徽章、倒计时的读屏与对比度)
+- 测试:公开状态接口要有集成测试(使用 S7 的测试库):别名不存在返回 404;`live`、`upcoming`(`before_first` 和 `between_days`)、`ended`、暂无排期各一个用例;响应里不含内部编号和观众数据
+- 验收:`pnpm dev` 之后,浏览器打开 `/w/demo-whitelist` 能看到标题、状态和倒计时;改变演示场次的时间后,状态随之变化;不存在的别名显示"找不到"页面而不是崩溃。没有管理后台时,用 DBeaver 修改演示场次的 `startsAt`、`endsAt` 来验证状态变化;重新运行带 `--demo` 的种子会把演示场次时间重新定位到"现在"附近
+- 使用的 Skills:`nextjs`、`nestjs-best-practices`、`prisma-client-api`、`frontend-design:frontend-design`、`web-design-guidelines`(完成后检查);`security-review` 用来检查这个公开接口
 
 ## 安装与依赖
 
@@ -426,7 +449,7 @@ M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全
 - 管理员是否需要两步验证
 - 是否保留虚拟人数与预设评论的总开关
 - web 取数没有超时设置,M3 之前处理
-- `layout.tsx` 缺 `<html lang>`,等默认界面语言定了再补
+- M1.5 先按临时默认语言设置 `<html lang>`,最终语言在"默认界面语言"定了之后再核对
 - 演示用的真实 Vimeo 视频 ID(M5a 之前提供,之前用占位值)
 - OPEN 模式观众自助注册遇到 `review` 号码怎么办(M4 前定)。倾向(尚未决定):`ready` 和 `review` 都接受并按 E.164 入库(OPEN 不设门槛,手机号不用来证明身份),`invalid` 拒绝并提示重填;管理员名单里对 `NOT_VALID_RANGE` 的号码用 `parsePhone` 即时显示"号段无效"标记,不新增数据库字段
 - CountryCode 的删除规则(M3 做国家码设置时定)。倾向(尚未决定):不允许删除当前默认国家,必须先把默认改到另一个国家;不允许删除最后一个国家。原因:没有默认国家时,本地格式的号码全部会变成 `invalid`,观众下拉和导入预览也没有默认值
@@ -442,13 +465,14 @@ M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全
 4. **时间:** 数据库 `timestamptz`;API 传 ISO 8601 UTC;按 `webinar.timezone` 展示;直播状态以服务器时间为准
 5. **校验:** 入参用 `packages/shared` 的 zod schema,前后端共用
 6. **手机号与邮箱:** 手机号 E.164,邮箱小写。规范化函数放 `packages/shared`,用 `libphonenumber-js`,默认国家作为参数传入,必须有单元测试
-7. **测试:** 纯函数先写测试再写实现;身份匹配、场次状态、权限必须有集成测试。M1 做纯函数的完整单元测试;身份匹配与场次状态的集成测试放在 M4
+7. **测试:** 纯函数先写测试再写实现;身份匹配、场次状态、权限必须有集成测试。M1 做纯函数的完整单元测试;场次状态的集成测试在 M1.5(公开状态接口)做,身份匹配的集成测试放在 M4
 8. **依赖:** 只用技术栈里列出的"已批准依赖",其余新依赖先说明理由,等我确认
 9. **密钥:** 只放 `.env`;保持 `.env.example` 同步
-10. **文案:** 界面文字走 i18n 字典(zh/en),不硬编码
+10. **文案:** 界面文字走 i18n 字典(zh/en),不硬编码。M1.5 用「M1.5 可见切片」里的字典文件满足本规则,M3 起迁移到 next-intl
 11. **范围:** 不做多租户、不做现场直播、不做视频托管、不做支付
 12. **隐形字符:** 源码和测试里不得出现隐形字符。需要写零宽字符、不换行空格、方向标记等,必须用 `\uXXXX` 转义,不要让编辑工具把转义变成真实字符;提交前检查
 13. **随机测试:** 测试里的随机输入必须用固定种子的伪随机数生成器,固定迭代次数,不用 `Math.random`
+14. **纯函数不读取系统时间:** 需要"现在"的函数,把 `now` 作为参数传入;测试用假计时器,并把系统时间设成与测试数据毫无关系的时刻,证明结果不依赖系统时间
 
 ## Skills 分工
 
@@ -480,7 +504,7 @@ M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全
 - 新页面或新组件:先用 `frontend-design:frontend-design` 定风格并实现
 - 统一配色、字体、图表:按需用 `ui-ux-pro-max`,不是每次都用
 - 页面写完:用 `web-design-guidelines` 做无障碍与规范审查
-- 按顺序分步使用,不并行:`ui-ux-pro-max`(定配色字体,一次)→ `frontend-design`(实现)→ `web-design-guidelines`(审查)
+- 按顺序分步使用,不并行:`ui-ux-pro-max`(定配色字体,一次)→ `frontend-design`(实现)→ `web-design-guidelines`(审查)。例外:M1.5 只有一个页面,跳过 `ui-ux-pro-max`,配色字体集中在一处,留到 M3 统一
 - 观看页的布局规则以本文件为准,设计 Skill 只管视觉
 
 ### 按里程碑额外使用
@@ -488,6 +512,7 @@ M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全
 |---|---|
 | M0 | `nextjs`、`nestjs-best-practices` |
 | M1 | `prisma-client-api` |
+| M1.5 | `nextjs`、`nestjs-best-practices`、`prisma-client-api`、`frontend-design:frontend-design`、`web-design-guidelines`(完成后检查)、`security-review`(公开接口) |
 | M2 | `nestjs-best-practices`、`prisma-client-api`、`security-review` |
 | M3 | `nextjs`、`vercel-react-best-practices`、`frontend-design:frontend-design`、`ui-ux-pro-max`(一次,定统一配色与字体)、`web-design-guidelines`(完成后检查)。后台保持简洁 |
 | M4 | `nextjs`、`nestjs-best-practices`、`security-review`、`frontend-design:frontend-design`(落地页)、`web-design-guidelines`(完成后检查) |
