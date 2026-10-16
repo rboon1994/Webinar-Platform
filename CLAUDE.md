@@ -70,6 +70,9 @@ apps/api 若 Jest 跑不通 ESM,先停下来问,不要自行改用 Vitest。
 
 约定:
 - `apps/web/scripts/run-next.mjs`:读 `WEB_PORT`,映射成 Next 读的 `PORT`,再启动 Next
+- `apps/web/scripts` 下有 `build-web-env.mjs`(纯函数 `buildWebEnv`,含测试);`run-next.mjs` 启动前会读取根 `.env` 并调用它
+- `apps/api/src/load-env.ts` 负责加载根 `.env`,`main.ts` 的第一个导入就是它
+- `apps/api` 的测试放在 `apps/api/test/`,不放 `src/`(`tsconfig.build.json` 只含 `src` 且不带 jest 类型,放 `src` 会被编进构建)
 - 每个包用两个 tsconfig:`tsconfig.json` 含测试,用于 typecheck;`tsconfig.build.json` 排除测试,用于 build
 - `packages/shared/src` 按文件放纯函数(见「核心纯函数」),测试与源文件同目录(`*.test.ts`)
 
@@ -94,12 +97,15 @@ pnpm typecheck
 - Prisma 生成物放 `apps/api/src/generated/prisma`,加入 `.gitignore`。api 的 `predev`、`prebuild`、`pretest`、`pretypecheck` 在构建 shared 之后再运行 `prisma generate`。全新克隆里没有生成物,靠这些 pre 脚本生成
 - 默认端口:api 4000(`API_PORT`),web 3000(`WEB_PORT`);`API_URL` 默认 `http://localhost:4000`
 - web 的 `dev`/`start` 走 `scripts/run-next.mjs`。Windows 上它的信号转发不可靠,部署到 Linux 时(M8)再确认
+- Jest 给每个测试文件一份 `process.env` 的副本,而 `process.loadEnvFile` 写的是真实环境;要测"读写环境变量"的代码,在普通 Node 子进程里测
+- `load-env.ts` 导入时就会执行加载。因此 S7 的数据库测试必须显式使用 `TEST_DATABASE_URL` 建立连接,不能靠这个导入副作用
 - 已知问题:根目录 `pnpm dev` 会让 api 与 web 的 `predev` 同时构建 shared,两个 `tsc` 同时写入 `shared/dist`。连续 5 次实测没有出问题。若启动 `dev` 时偶发"找不到 shared"或文件被占用,重启即可;只有反复出现才处理,不要提前改脚本约定
+- 已知问题:`pnpm --filter web build` 直接运行 `next build`,不读根 `.env`。首页是动态路由,每次请求才读 `API_URL`,所以构建不需要它。如果以后出现构建期预渲染且依赖 `API_URL` 的页面,再让 `build` 也走启动器
 
 ## 环境变量
 
 - 根目录一个 `.env`(从 `.env.example` 复制),所有 app 读它
-- `DATABASE_URL` 只允许 `apps/api` 与 Prisma 使用。`apps/web` 的代码不得引用 `DATABASE_URL` 或任何密钥
+- `DATABASE_URL` 只允许 `apps/api` 与 Prisma 使用。`apps/web` 的代码不得读取或使用 `DATABASE_URL` 的值,也不得读取或使用任何密钥(`apps/web/scripts` 里的 `buildWebEnv` 只写出这个名字用于剔除,见下文)
 - 任何密钥类变量不得以 `NEXT_PUBLIC_` 开头
 - web 进程只加载白名单变量(`WEB_PORT`、`API_URL`),不得把整个 `.env` 载入 web 进程。实现方式在 M1 计划里提出,并用测试或实测证明 web 进程里读不到 `DATABASE_URL`
 - 加载方式(Node 的 `--env-file`、Next 的加载、Prisma 读取位置)必须在计划里先查证,不靠猜
@@ -109,12 +115,19 @@ pnpm typecheck
 - 新增 `TEST_DATABASE_URL`;测试库名固定 `webinar_platform_test`。给测试库建表用 `prisma migrate deploy`,不用 `migrate reset`。绝不对开发库执行 `migrate reset`
 - 测试用例和测试客户端不用 `DATABASE_URL` 连接;只有 `assertTestDatabase` 读取它的库名来比较
 - 守卫函数 `assertTestDatabase`:库名必须以 `_test` 结尾且与 `DATABASE_URL` 的库名不同,否则抛错;每次建测试客户端和每次清表前都调用
-- `apps/web` 下不得有 `.env` 文件;web 非测试源码里不得出现 `DATABASE_URL` 或以 `NEXT_PUBLIC_` 开头的密钥名(用守卫测试扫描)
+- `apps/web` 下不得有 `.env` 文件;`apps/web/app` 下的非测试源码不得出现 `DATABASE_URL` 或 `NEXT_PUBLIC_`(用守卫测试扫描);`apps/web/scripts` 里的 `buildWebEnv` 为了剔除它必须写出 `DATABASE_URL` 这个名字,所以 `scripts/` 不在守卫范围内,但也不得读取或使用它的值
 
-**已定方案(以实现为准)**
-- api 和 Prisma 用 Node 自带的 `process.loadEnvFile` 读根 `.env`:路径从文件自身位置推出,已存在的环境变量优先,文件缺失就忽略
-- `prisma.config.ts` 直接读 `process.env.DATABASE_URL`,不用 `env()`,这样没有 `.env` 的机器也能跑 `prisma generate`
-- web 用一个纯函数 `buildWebEnv` 解析根 `.env`,只挑 `WEB_PORT` 和 `API_URL` 传给 Next 子进程,不写入当前进程
+**已实现(S1)**
+- api 用 Node 自带的 `process.loadEnvFile` 读根 `.env`(`apps/api/src/load-env.ts`):路径从文件自身位置推出(`src/` 和 `dist/` 下都是 `../../../.env`),已存在的环境变量优先,只有文件不存在才忽略,其他错误照常抛出
+- web 用纯函数 `buildWebEnv` 解析根 `.env`(用 `util.parseEnv`,只解析,不写入当前进程),结果传给 Next 子进程。规则:
+  - 白名单变量是 `WEB_PORT`、`API_URL`;系统环境变量优先于 `.env`
+  - 子进程环境 = 当前进程环境 + 白名单变量,再剔除"根 `.env` 里出现的所有非白名单键"和 `DATABASE_URL`、`TEST_DATABASE_URL`(无论是否出现在 `.env`)
+  - 变量名比较不区分大小写
+- web 要新增环境变量时,必须先加进白名单并更新本节
+- 守卫测试只扫描 `apps/web/app` 下的非测试源码;`scripts/` 不扫(`buildWebEnv` 必须写出 `DATABASE_URL` 这个名字)
+
+**待实现(S6)**
+- Prisma 读根 `.env` 的方式与 api 相同(`process.loadEnvFile`);`prisma.config.ts` 直接读 `process.env.DATABASE_URL`,不用 `env()`,这样没有 `.env` 的机器也能跑 `prisma generate`
 
 ---
 
@@ -353,7 +366,7 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - M4、M5 的评论与踢出先用轮询(踢出:每次请求校验 + 10 秒轮询),M6 再换成 SSE
 
 M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全绿):
-- S1 环境变量 → S2 规范化与时间解析 → S3 场次与期 → S4 人气 → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
+- S1 环境变量(已完成) → S2 规范化与时间解析 → S3 场次与期 → S4 人气 → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
 - M1 完成后的整体验收,必须从全新克隆再跑一遍
 
 完成一个里程碑才进下一个。每个里程碑开始前,先出计划,等我确认再改代码。
