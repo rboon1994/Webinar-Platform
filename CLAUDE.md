@@ -107,12 +107,11 @@ pnpm typecheck
 - 根目录一个 `.env`(从 `.env.example` 复制),所有 app 读它
 - `DATABASE_URL` 只允许 `apps/api` 与 Prisma 使用。`apps/web` 的代码不得读取或使用 `DATABASE_URL` 的值,也不得读取或使用任何密钥(`apps/web/scripts` 里的 `buildWebEnv` 只写出这个名字用于剔除,见下文)
 - 任何密钥类变量不得以 `NEXT_PUBLIC_` 开头
-- web 进程只加载白名单变量(`WEB_PORT`、`API_URL`),不得把整个 `.env` 载入 web 进程。实现方式在 M1 计划里提出,并用测试或实测证明 web 进程里读不到 `DATABASE_URL`
-- 加载方式(Node 的 `--env-file`、Next 的加载、Prisma 读取位置)必须在计划里先查证,不靠猜
-- `.env.example` 随代码更新,密码用占位符 `CHANGE_ME`
+- web 进程只加载白名单变量(`WEB_PORT`、`API_URL`),不得把整个 `.env` 载入 web 进程;由 `buildWebEnv` 的单元测试和守卫测试保证(见下方「已实现(S1)」)
+- 读取环境变量的方式(Next 的加载、Prisma 读取位置)必须在计划里先查证,不靠猜
+- `.env.example` 随代码更新,包含 `DATABASE_URL` 和 `TEST_DATABASE_URL`,密码用占位符 `CHANGE_ME`
 - 数据库密码含特殊字符(如 `@` `:` `/` `#` 空格)时,在连接字符串里要做 URL 编码
-- `.env.example` 要包含 `DATABASE_URL` 和 `TEST_DATABASE_URL`,密码用占位符 `CHANGE_ME`
-- 新增 `TEST_DATABASE_URL`;测试库名固定 `webinar_platform_test`。给测试库建表用 `prisma migrate deploy`,不用 `migrate reset`。绝不对开发库执行 `migrate reset`
+- `TEST_DATABASE_URL` 指向测试库,库名固定 `webinar_platform_test`。给测试库建表用 `prisma migrate deploy`,不用 `migrate reset`。绝不对开发库执行 `migrate reset`
 - 测试用例和测试客户端不用 `DATABASE_URL` 连接;只有 `assertTestDatabase` 读取它的库名来比较
 - 守卫函数 `assertTestDatabase`:库名必须以 `_test` 结尾且与 `DATABASE_URL` 的库名不同,否则抛错;每次建测试客户端和每次清表前都调用
 - `apps/web` 下不得有 `.env` 文件;`apps/web/app` 下的非测试源码不得出现 `DATABASE_URL` 或 `NEXT_PUBLIC_`(用守卫测试扫描);`apps/web/scripts` 里的 `buildWebEnv` 为了剔除它必须写出 `DATABASE_URL` 这个名字,所以 `scripts/` 不在守卫范围内,但也不得读取或使用它的值
@@ -153,7 +152,7 @@ pnpm typecheck
 - 实时评论:只能隐藏,不能删除
 - 观众:日常用"踢出",可恢复。只有 ADMIN 能彻底删除观众,同时删除其报名、出勤记录和评论(清除个人资料)
 - 所有删除操作都写入审计日志
-- 数据库外键用 RESTRICT 兜底;服务在同一事务里先删"空的"子记录再删本体;预设评论由服务先删。细节在 M2 计划里定
+- 数据库外键用 RESTRICT 兜底;服务在同一事务里先删"空的"子记录再删本体。细节在 M2 计划里定
 
 ## 核心概念(三层结构)
 
@@ -254,7 +253,7 @@ pnpm typecheck
 1. 规范化手机和邮箱
 2. 按邮箱找到 A,按手机找到 B
 3. A、B 都存在且不是同一人 → 其中任何一人已被踢出则拒绝;都没被踢出则以 A(邮箱)为准,不改任何字段,记警告日志
-4. 只找到其中一个 → 沿用;对方缺手机或邮箱且新值没被占用,则补全
+4. 只找到其中一个 → 沿用;找到的那个人缺手机或邮箱,且新值没被别人占用,则补全
 5. 已存在但没报名可报名的期的人,自动补报名可报名的期并放行
 6. 都找不到 → 新建(来源=SELF_REGISTERED);有可报名的期则报名,没有则拒绝(`NO_RUN`),并且不创建该观众
 7. 已存在的人不覆盖姓名
