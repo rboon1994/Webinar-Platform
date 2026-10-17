@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizePhone, parsePhone } from "./phone.js";
+import { E164_CHECK, normalizePhone, parsePhone } from "./phone.js";
 
 // small seeded PRNG so the property tests are repeatable
 function mulberry32(seed: number) {
@@ -11,7 +11,35 @@ function mulberry32(seed: number) {
   };
 }
 
+// written out by hand on purpose: the property tests below use it as an independent check of what the code produces
 const DB_CHECK = /^\+[1-9][0-9]{6,14}$/;
+
+describe("E164_CHECK (the rule of the database CHECK on Attendee.phone)", () => {
+  it.each([
+    ["+60160809580", true],
+    ["+6591234567", true],
+    ["+1234567", true], // 7 digits, the shortest allowed
+    ["+123456789012345", true], // 15 digits, the longest allowed
+    ["+4957660972710713", false], // 16 digits
+    ["+491643", false], // 6 digits
+    ["60160809580", false], // no plus
+    ["+0123456789", false], // starts with 0
+    ["+60 16 080 9580", false], // spaces
+    ["+60160809580 ", false], // trailing space
+    ["+60160809580\n", false], // trailing newline
+    ["", false],
+    ["+", false],
+  ])("%j matches: %s", (value, expected) => {
+    expect(E164_CHECK.test(value)).toBe(expected);
+    expect(E164_CHECK.test(value)).toBe(DB_CHECK.test(value));
+  });
+
+  it("is the same rule that parsePhone enforces on its results", () => {
+    expect(parsePhone("+4957660972710713", "MY").reasons).toEqual(["E164_OUT_OF_RANGE"]);
+    expect(parsePhone("+491643", "MY").reasons).toEqual(["E164_OUT_OF_RANGE"]);
+    expect(E164_CHECK.test(parsePhone("0160809580", "MY").e164 ?? "")).toBe(true);
+  });
+});
 
 describe("parsePhone: ready", () => {
   it.each([

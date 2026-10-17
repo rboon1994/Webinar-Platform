@@ -17,8 +17,8 @@ export type PhoneParse = {
   reasons: PhoneReason[];
 };
 
-// the same rule as the database CHECK on Attendee.phone (the library accepts a few numbers outside it)
-const E164_CHECK = /^\+[1-9][0-9]{6,14}$/;
+// the rule of the database CHECK on Attendee.phone (the library accepts a few numbers outside it); shared with resolveIdentity
+export const E164_CHECK = /^\+[1-9][0-9]{6,14}$/;
 
 // layout characters carry no meaning: format characters (zero-width, direction marks, BOM) go, every kind of whitespace
 // becomes a plain space, every kind of dash and the minus sign become "-"
