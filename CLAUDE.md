@@ -143,7 +143,7 @@ pnpm typecheck
 - 观众姓名必填
 - 停用的研讨会和期,由调用方先过滤掉再交给选择函数
 - OPEN 模式补报名和新建报名,只针对"可报名的期"(定义见「当前期的定义」)。没有则拒绝,提示"暂无可报名的期"(`NO_RUN`)。这和「当前期的定义」第③条(最近结束的期)不同:第③条只用于展示状态,不用于报名
-- WHITELIST:有名单记录但没有报名可进入的期,与"找不到"用同一句"未找到报名记录"
+- WHITELIST:有名单记录但没有报名任何有场次的期,与"找不到"用同一句"未找到报名记录"
 
 ### 删除策略(混合)
 - 研讨会、期:有任何关联数据(报名、出勤、评论)只能停用(`isActive=false`),不能删除;没有任何关联数据才允许删除
@@ -246,7 +246,7 @@ pnpm typecheck
 2. 在该研讨会的名单里精确查找
 3. 找不到 → 统一提示"未找到报名记录",不透露哪个字段不匹配
 4. 已被踢出 → 提示"访问已被撤销,请联系主办方"
-5. 必须有该场次所属期的报名记录
+5. 必须报名了至少一个有场次的期;进入的是他报名的期里的当前期(按「当前期的定义」选出),该期已结束也放行(页面显示"系列已结束")。如果他一个有场次的期都没报名,按"未找到报名记录"处理(对外与找不到同一句话)
 
 **OPEN**
 执行顺序:规范化 → 按邮箱和手机查找 A、B → 检查被踢出(匹配到的任何人已被踢出则 `KICKED` 拒绝,不做任何写入)→ 确定可报名的期(没有则 `NO_RUN` 拒绝,不做任何写入)→ 只有通过这两步检查,才可以补全手机或邮箱、补报名、或新建。`KICKED` 优先于 `NO_RUN`。
@@ -280,12 +280,19 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 ## 核心纯函数
 
 - 全部放 `packages/shared`,先写测试再写实现,不访问数据库
-- `resolveIdentity`(OPEN):调用方先规范化并查出 A、B 及其已报名的期,连同"可报名的期"一起传入。返回 `rejected`(类型里没有 `writes` 字段)或 `proceed`(`writes` 只有 `createAttendee`、`fillPhone`、`fillEmail`、`enroll` 四种数据,函数自己不执行任何东西)。函数按顺序执行:先检查 A、B 是否有人被踢出,有则返回 `rejected`(`KICKED`);再检查有没有可报名的期,没有则返回 `rejected`(`NO_RUN`);`KICKED` 优先于 `NO_RUN`。只有两步都通过才计算 `writes`,所以类型层面不可能带写入。写入里永远不含改姓名。`rejected` 的原因有 `KICKED` 和 `NO_RUN`。没有可报名的期时,无论是新观众还是已存在的人,都返回 `rejected`(`NO_RUN`),不做任何写入(新观众也不创建)。有可报名的期时:已存在的人已报名该期则放行;报名的是别的期,则 `writes` 里带 `enroll` 报名可报名的那一期
+- `resolveIdentity(input, lookup, enrollableRunId)`(OPEN):`input` 是 `{ name, phone, email }`,调用方已规范化(`phone` 是 E.164,`email` 是小写);`lookup` 是 `{ byEmail(即 A), byPhone(即 B) }`,各为 `null` 或 `KnownPerson { id, phone, email, status, enrolledRunIds }`;`enrollableRunId` 是 `selectEnrollableRun` 的结果。返回 `rejected`(`reason`: `KICKED` | `NO_RUN`;类型里没有 `writes` 字段,运行时也没有这个键)或 `proceed { attendee, runId, writes, warnings }`。`attendee` 是 `AttendeeRef`:`{ kind: 'existing', attendeeId }` 或 `{ kind: 'new' }`。`Write` 只有四种数据:`createAttendee`(`name`、`phone`、`email`、`source: SELF_REGISTERED`)、`fillPhone`(`attendeeId`、`phone`)、`fillEmail`(`attendeeId`、`email`)、`enroll`(`runId`、`attendee: AttendeeRef`);函数自己不执行任何东西。`Warning` 只有 `EMAIL_PHONE_CONFLICT`(带两个人的 id)。写入顺序:新观众是 `[createAttendee, enroll]`;已存在的人是 `[fillPhone 或 fillEmail(有的话), enroll(需要的话)]`。`runId` 就是 `enrollableRunId`
   - 测试用例要求补充三条:
     - 已报名可报名的期,不产生 `enroll`
     - 只报名了别的期,而可报名的期是另一个,则 `writes` 带 `enroll`(原有报名不动)
     - 同时被踢出且没有可报名的期时,返回 `KICKED` 而不是 `NO_RUN`
-- `resolveWhitelistAccess`:返回 `allowed` 或 `denied`(`NOT_FOUND`、`KICKED`、`NOT_ENROLLED`,其中 `NOT_FOUND` 与 `NOT_ENROLLED` 对外同一句话)。输入含 `@` 视为邮箱,否则视为手机号
+- `resolveIdentity` 的执行顺序(不得重排):① 校验输入,不合法抛 `RangeError`(先于一切,所以被踢出的人加上坏输入也是抛错,不是 `KICKED`);② 匹配到的任何人已被踢出 → `rejected`/`KICKED`;③ `enrollableRunId` 为 `null` → `rejected`/`NO_RUN`(新观众不创建,已存在的人不写入);④ 才计算写入。`KICKED` 优先于 `NO_RUN`
+- `resolveIdentity` 的写入规则:A、B 都为 `null` → `[createAttendee, enroll]`;A、B 是同一个人 → 当作一个人,无警告;A、B 是不同的人 → 用 A,不补全任何字段,带 `EMAIL_PHONE_CONFLICT` 警告;只有 A 且 A 没有手机 → `fillPhone`;只有 B 且 B 没有邮箱 → `fillEmail`;已有不同的手机或邮箱则不改;被使用的人没报名 `enrollableRunId` 才加 `enroll`(已报名则不加,原有的其他报名不动);已存在的人的姓名永远不被修改,`createAttendee` 只在 A、B 都为 `null` 时出现
+- `resolveIdentity` 的输入校验(`RangeError`):`name` 去空格后为空;`phone` 不匹配 `E164_CHECK`;`email` 为空或不是小写;`byEmail` 不为 `null` 但它的 `email` 不等于 `input.email`;`byPhone` 不为 `null` 但它的 `phone` 不等于 `input.phone`
+- `parseWhitelistInput(raw, defaultCountry)`:只做分类和规范化,不查库。含 ASCII `@` 才视为邮箱(用 `normalizeEmail`,得到 `null` 则 `invalid`;含 `@` 的输入永远不会被当成手机号);否则视为手机号(用 `parsePhone`,`ready` 和 `review` 都得到 `phone`,`invalid` 得到 `invalid`)。全角 `＠` 不算 `@`。返回 `{ kind: 'email', email }` | `{ kind: 'phone', phone }` | `{ kind: 'invalid' }`
+- `resolveWhitelistAccess(match, now)`:`match` 是 `null` 或 `{ id, status, enrolledRuns }`;`enrolledRuns` 是调用方已过滤掉停用的期的、该人报名的期。顺序:先校验 `now`(无效或不是 `Date` 一律抛 `RangeError`,即使 `match` 为 `null` 或被踢出);`match` 为 `null` → `denied`/`NOT_FOUND`;`status` 为 `KICKED` → `denied`/`KICKED`(优先于 `NOT_ENROLLED`);否则在他报名的期里用 `selectCurrentRun` 选当前期,选不出(报名的期都没有场次,或没有报名)→ `denied`/`NOT_ENROLLED`;选出了就 `allowed`,返回 `{ attendeeId, runId, phase: live | upcoming | ended }`。报名的期已结束仍然放行(`phase` 为 `ended`,页面显示"系列已结束"),避免老学员在系列结束后回来看到"未找到报名记录"
+- `publicReason(reason)`:对外返回的原因。`NOT_FOUND` 和 `NOT_ENROLLED` 都映射成 `NOT_FOUND`(不透露是哪个条件不满足);`KICKED` → `REVOKED`;`NO_RUN` → `NO_RUN`。用 `switch` 保证穷尽。对外接口只能返回 `publicReason` 的结果,不得返回内部原因
+- `E164_CHECK`(`^\+[1-9][0-9]{6,14}$`)是 TypeScript 源码里数据库 CHECK 规则的唯一实现,在 `phone.ts` 里导出,`parsePhone` 和 `resolveIdentity` 共用。迁移里的 SQL CHECK 是数据库端的另一份,两者必须一致,S7 的数据库测试要验证这一点;测试里手写的独立副本是有意保留的,用来独立检查代码输出
+- 导出:`parseWhitelistInput`、`resolveWhitelistAccess`、`publicReason`、`resolveIdentity`、`E164_CHECK` 及相关类型(`KnownPerson`、`OpenInput`、`OpenLookup`、`AttendeeRef`、`OpenWrite`、`OpenWarning`、`OpenResolution`、`WhitelistMatch`、`WhitelistAccess`、`PublicReason` 等)。`instant` 和 `range` 是包内辅助函数,不导出
 - `getWebinarState(sessions, now)`:输入是场次数组(`{id, startsAt, endsAt}`)和 `now`,顺序任意;返回判别联合 `live`(`session`)/ `upcoming`(`phase`: `before_first` | `between_days`,`next`)/ `ended`(`lastEnded`)/ `no_schedule`。规则不变:`live` 同时有多场时取 `startsAt` 最早,再取 id 小的;`upcoming` 取 `startsAt` 最早,再取 id 小的;`before_first` 指没有任何已结束场次;`ended` 的 `lastEnded` 取 `endsAt` 最晚,再取 id 小的。返回的 `session` 是传入的对象本身,不是副本
 - `selectCurrentRun(runs, now)`:输入的 run 是 `{id, createdAt, sessions[]}`,调用方已过滤停用的期和(登录观众)未报名的期;返回 `{ runId, phase: live | upcoming | ended }` 或 `null`。按「当前期的定义」①②③:② 里每个期用自己"最早的未来场次"的开始时间比较;③ 里用每个期"最大的 `endsAt`"比较,最晚的优先;同一阶段内并列取 `createdAt` 最早,再取 id 小的。有已结束又有未开始场次的期算 `upcoming`。没有场次的期被忽略(但仍校验它的 `createdAt`)
 - `selectEnrollableRun(runs, now)`:返回 `string | null`;当前期的阶段是 `live` 或 `upcoming` 时返回 `runId`,`ended` 或没有当前期返回 `null`(即「可报名的期」)
@@ -320,7 +327,16 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - 已知误判:美国国内写法 `1-202-555-0123` 会被判为 `review`(`LOOKS_LIKE_INCLUDES_COUNTRY_CODE`),可以接受
 
 ### 已知风险
-- `instant()` 用 `instanceof Date` 判断,在 Jest 沙箱里,来自另一个运行环境的 `Date` 可能被误判为无效。如果 S7 的数据库测试里出现"not a valid date",改成跨环境的判断(例如 `Object.prototype.toString.call(x) === "[object Date]"`),并用 `vm.runInNewContext` 造一个跨环境的 `Date` 写回归测试。在出现之前不要改
+- `instant()` 用 `instanceof Date` 判断,在 Jest 沙箱里,来自另一个运行环境的 `Date` 可能被误判为无效。如果 S7 的数据库测试里出现"not a valid date",改成跨环境的判断(例如 `Object.prototype.toString.call(x) === "[object Date]"`),并用 `vm.runInNewContext` 造一个跨环境的 `Date` 写回归测试。在出现之前不要改。S5 的 `resolveWhitelistAccess` 也会调用它
+
+## 调用方的职责(M4 实现时必须遵守)
+
+- 服务负责:规范化输入;在该研讨会内按邮箱查 A、按手机查 B;读出他们已报名的期;在该研讨会所有启用的期里用 `selectEnrollableRun` 算出可报名的期;再调用纯函数
+- 纯函数返回 `proceed` 后,服务把 `writes` 在同一个数据库事务里按顺序执行(`createAttendee` 之后,`enroll` 用新建的观众 id);任何一步失败整体回滚
+- 并发:两个请求同时用同一个邮箱或手机自助注册时,`createAttendee` 可能撞上数据库的唯一约束。服务必须捕获该错误,重新查找 A、B 并再调用一次 `resolveIdentity`,不得把唯一约束错误直接返回给观众,也不得创建重复的人
+- 警告(`EMAIL_PHONE_CONFLICT`)写入日志
+- 对观众返回的拒绝原因只能用 `publicReason` 的结果
+- 服务必须有集成测试覆盖:被踢出的人在任何路径下数据库里没有任何新增或修改;并发注册不产生重复的人
 
 ## 直播同步规则
 
@@ -419,7 +435,7 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - M4、M5 的评论与踢出先用轮询(踢出:每次请求校验 + 10 秒轮询),M6 再换成 SSE
 
 M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全绿):
-- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期(已完成) → S4 人气(已完成) → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
+- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期(已完成) → S4 人气(已完成) → S5 身份匹配(已完成) → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
 - M1 完成后的整体验收,必须从全新克隆再跑一遍
 
 完成一个里程碑才进下一个。每个里程碑开始前,先出计划,等我确认再改代码。
