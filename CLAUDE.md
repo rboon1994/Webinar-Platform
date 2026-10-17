@@ -189,7 +189,7 @@ pnpm typecheck
 | AuditLog | 谁、何时、做了什么;`entityId` 是普通字符串,不加外键(被删对象的审计记录要保留) |
 
 `hypeConfig` 的 JSON 结构:`{base, nodes:[{minute,count}], jitterPercent, jitterIntervalSeconds}`
-- zod 约束:`base` 是 ≥0 整数;`nodes` 最多 100 个,`minute` ≥1 且严格递增,`count` ≥0;`jitterPercent` 0 到 100;`jitterIntervalSeconds` 1 到 300
+- zod 约束:`base` 是 0 到 1000000 的整数;`nodes` 最多 100 个,`minute` 是 1 到 1440 的整数且严格递增,`count` 是 0 到 1000000 的整数;`jitterPercent` 是 0 到 100 的整数;`jitterIntervalSeconds` 是 1 到 300 的整数。拒绝未知字段(顶层和节点里都是);`{}` 合法,解析后得到完整默认值(这也是数据库的默认值)
 - 默认:`base` 0、`nodes` 空、`jitterPercent` 0、`jitterIntervalSeconds` 10,即不显示虚拟人数
 
 数据库规则:
@@ -304,7 +304,12 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
   - `defaultCountry` 不是库认识的国家码时不抛异常:本地格式得到 `invalid`(`UNPARSEABLE`),国际格式照常解析。所以"添加国家码"的功能(M3)必须在保存时校验该国家码被库支持
 - `normalizeEmail`:去首尾空格并转小写;只接受可打印 ASCII 字符(含控制字符一律拒绝);必须恰好一个 `@`;本地部分和域名都不能为空;域名必须含点;本地部分和域名都不能以点开头或结尾、不能有连续两个点;总长不超过 254;保留 `+` 后缀和 Gmail 的点
 - `parseTriggerSeconds`:支持纯秒数、数字、`mm:ss`、`h:mm:ss`,全角冒号等同半角;两段时分钟可超过 59,三段时分钟必须小于 60;冒号格式里秒必须小于 60;小数一律四舍五入;拒绝负数、`NaN`、`Infinity`、含字母(含 `1e3`、`0x10`)、带正负号、空段、超过 `maxSeconds`(取整之后比较)、`Date` 对象
-- `seededJitter`:只用整数运算,保证浏览器和服务器结果一致
+- `hypeConfigSchema`(zod,含默认值)、`defaultHypeConfig`(冻结)、类型 `HypeConfig`
+- `computeHypeBase(config, elapsedSeconds)`:`elapsedSeconds` 小于 0 当作 0,不是有限数抛 `RangeError`;节点的 `minute` 不严格递增或数值不是有限数抛 `RangeError`;结果是非负整数
+- `seededJitter(sessionId, slice, curveValue, jitterPercent)`:返回 `Math.round(curveValue × (1 − p/100 + r × 2p/100))`;`jitterPercent` 为 0 时恰好等于 `Math.round(curveValue)`;`curveValue` 不是有限非负数、`jitterPercent` 不在 0 到 100,抛 `RangeError`
+- `computeHypeTarget`:`realOnline` 必须是非负整数,`elapsedSeconds` 必须是有限数(包括不能是 `-Infinity`),否则抛 `RangeError`
+- 对外导出:`hypeConfigSchema`、`defaultHypeConfig`、`HypeConfig`、`computeHypeBase`、`computeHypeTarget`、`seededJitter`;`seededRandom` 不导出
+- 注:`seededRandom` 用 `%` 和 `/` 把 `slice` 拆成低、高 32 位,`slice` 必须是非负安全整数,在这个范围内两者都是精确的
 
 ### 库的已知行为(以实验为准)
 - 库会把一些违反数据库 CHECK 的号码判为有效(德国 16 位或 6 位、伊朗 6 位、尼日利亚 16 位),所以 `isValid` 之后必须再做 CHECK 检查
@@ -361,11 +366,18 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 
 ### 人气引擎
 - 显示人数 = 虚拟部分 + 真实在线人数
-- 虚拟曲线:`[{minute:0, count:base}, ...nodes]` 按分钟排序;节点之间线性插值;超过最后节点取最后值;结果取整
-- 抖动:每 N 秒重算目标 `round(曲线值 × (1 − p% + 随机 × 2p%))`;随机数由"会话 ID + 时间片"决定,同一时间片所有观众目标相同
+- 虚拟曲线:`[{minute:0, count:base}, ...nodes]` 按分钟排序;节点之间线性插值;超过最后节点取最后值;结果取整。曲线值取整用四舍五入(一半向上);节点的秒数 = `minute × 60`;经过节点时值恰好等于该节点的 `count`
+- 抖动:每 N 秒重算目标 `round(曲线值 × (1 − p% + 随机 × 2p%))`;随机数由"会话 ID + 时间片"决定,同一时间片所有观众目标相同。曲线值取时间片开头那一刻(`slice × jitterIntervalSeconds`),不是观众当前的时刻。所以同一个时间片内,所有观众、所有时刻的目标完全相同,在任何配置下都成立(包括有斜率的曲线,也包括 `jitterPercent` 为 0)
 - 追赶:显示值每秒向目标靠近 1~3
 - 跳转(> 5 秒)时直接对齐,不要从 0 爬升
 - 服务端数据到达前不渲染
+- 浏览器和服务器必须调用同一个 `computeHypeTarget(config, sessionId, elapsedSeconds, realOnline)`,不得各自重写时间片的计算。它返回 虚拟部分 + `realOnline`;`sessionId` 指 RunSession ID;`elapsedSeconds` 小于 0 当作 0
+- 随机数算法 `seededRandom`(FNV-1a 作用于 `sessionId` 的每个 UTF-16 代码单元,再用 murmur3 的 `fmix32` 混入 `slice` 的低 32 位和高 32 位,最后除以 2^32)只在 shared 内部使用,不对外导出。它的输出被单元测试里的快照和校验和锁死。改动这个算法会改变所有观众看到的数字,必须是有意的变更:先在本文件记录原因,再同时更新快照
+- 人气引擎的计算只用 + − × ÷、`Math.round` 和整数运算(`Math.imul`、`>>>`、`^`),不得用 `Math.random`、`Date`、`Math.sin`、`Math.pow` 等,以保证各个环境结果一致。M5c 要在真实浏览器里对比验证(方式见「待定」)。这条只适用于 `packages/shared` 里的目标值计算(要在浏览器和服务器得出同一个数的部分)。追赶步长只影响单个观众自己屏幕上的显示,可以用随机数,但随机数必须通过参数注入(而不是在函数里直接调用 `Math.random`),测试里注入固定种子的伪随机数,以满足硬性规则 13
+- "只用整数运算"只对 `seededRandom` 成立(`Math.imul`、`>>>`、`^`、`+`;拆 `slice` 另用 `%` 和 `/`,见「核心纯函数」的注);计算目标值的其余部分(曲线插值、抖动、`computeHypeTarget`)用 + − × ÷ 和 `Math.round`,这些都是各个 JavaScript 环境结果一致的运算
+
+**已知观察点(M5c)**
+- 曲线每 N 秒阶梯式变化,抖动幅度大时目标一跳可能较大,而显示值每秒只向目标靠近 1~3,所以显示值会持续追赶、略有滞后,这是有意的(数字变化平滑)。M5c 在真实页面里观察,如果观感不好再调整
 
 ### 出勤统计
 - `join` 幂等(同人同场次一条记录)
@@ -407,7 +419,7 @@ OPEN 模式下身份未经验证,这是产品取舍,不是 bug。
 - M4、M5 的评论与踢出先用轮询(踢出:每次请求校验 + 10 秒轮询),M6 再换成 SSE
 
 M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全绿):
-- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期(已完成) → S4 人气 → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
+- S1 环境变量(已完成) → S2 规范化与时间解析(已完成) → S3 场次与期(已完成) → S4 人气(已完成) → S5 身份匹配 → S6 Prisma 与迁移 → S7 数据库测试 → S8 种子
 - M1 完成后的整体验收,必须从全新克隆再跑一遍
 
 完成一个里程碑才进下一个。每个里程碑开始前,先出计划,等我确认再改代码。
@@ -451,6 +463,7 @@ M1 分段(每段只做一件事,每段结束 lint、typecheck、test、build 全
 - web 取数没有超时设置,M3 之前处理
 - M1.5 先按临时默认语言设置 `<html lang>`,最终语言在"默认界面语言"定了之后再核对
 - 演示用的真实 Vimeo 视频 ID(M5a 之前提供,之前用占位值)
+- M5c 的真实浏览器对比验证方式。Playwright 不在已批准依赖里,M5 的 Skills 里也没有 `playwright-best-practices`(它只在 M8)。M5c 的计划里二选一:单独申请批准 Playwright(并把 `playwright-best-practices` 加进 M5 的 Skills),或者用环境里的浏览器工具做一次性验证。问之前不要自行决定
 - OPEN 模式观众自助注册遇到 `review` 号码怎么办(M4 前定)。倾向(尚未决定):`ready` 和 `review` 都接受并按 E.164 入库(OPEN 不设门槛,手机号不用来证明身份),`invalid` 拒绝并提示重填;管理员名单里对 `NOT_VALID_RANGE` 的号码用 `parsePhone` 即时显示"号段无效"标记,不新增数据库字段
 - CountryCode 的删除规则(M3 做国家码设置时定)。倾向(尚未决定):不允许删除当前默认国家,必须先把默认改到另一个国家;不允许删除最后一个国家。原因:没有默认国家时,本地格式的号码全部会变成 `invalid`,观众下拉和导入预览也没有默认值
 - 新功能想法
